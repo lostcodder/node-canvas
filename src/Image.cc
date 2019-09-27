@@ -1,17 +1,19 @@
-//
-// Image.cc
-//
 // Copyright (c) 2010 LearnBoost <tj@learnboost.com>
-//
 
+#include "Image.h"
+
+#include "bmp/BMPParser.h"
+#include "Canvas.h"
+#include <cerrno>
 #include <cstdlib>
 #include <cstring>
-#include <cerrno>
 #include <node_buffer.h>
-
 #include "Util.h"
-#include "Canvas.h"
-#include "Image.h"
+
+/* Cairo limit:
+  * https://lists.cairographics.org/archives/cairo/2010-December/021422.html
+  */
+static constexpr int canvas_max_side = (1 << 15) - 1;
 
 #ifdef HAVE_GIF
 typedef struct {
@@ -39,6 +41,8 @@ typedef struct {
   uint8_t *buf;
 } read_closure_t;
 
+using namespace v8;
+
 Nan::Persistent<FunctionTemplate> Image::constructor;
 
 /*
@@ -61,15 +65,17 @@ Image::Initialize(Nan::ADDON_REGISTER_FUNCTION_ARGS_TYPE target) {
   SetProtoAccessor(proto, Nan::New("height").ToLocalChecked(), GetHeight, SetHeight, ctor);
   SetProtoAccessor(proto, Nan::New("naturalWidth").ToLocalChecked(), GetNaturalWidth, NULL, ctor);
   SetProtoAccessor(proto, Nan::New("naturalHeight").ToLocalChecked(), GetNaturalHeight, NULL, ctor);
-
-  Nan::SetMethod(proto, "getSource", GetSource);
-  Nan::SetMethod(proto, "setSource", SetSource);
-#if CAIRO_VERSION_MINOR >= 10
   SetProtoAccessor(proto, Nan::New("dataMode").ToLocalChecked(), GetDataMode, SetDataMode, ctor);
+
   ctor->Set(Nan::New("MODE_IMAGE").ToLocalChecked(), Nan::New<Number>(DATA_IMAGE));
   ctor->Set(Nan::New("MODE_MIME").ToLocalChecked(), Nan::New<Number>(DATA_MIME));
-#endif
-  Nan::Set(target, Nan::New("Image").ToLocalChecked(), ctor->GetFunction());
+
+  Local<Context> ctx = Nan::GetCurrentContext();
+  Nan::Set(target, Nan::New("Image").ToLocalChecked(), ctor->GetFunction(ctx).ToLocalChecked());
+
+  // Used internally in lib/image.js
+  NAN_EXPORT(target, GetSource);
+  NAN_EXPORT(target, SetSource);
 }
 
 /*
@@ -84,8 +90,8 @@ NAN_METHOD(Image::New) {
   Image *img = new Image;
   img->data_mode = DATA_IMAGE;
   img->Wrap(info.This());
-  info.This()->Set(Nan::New("onload").ToLocalChecked(), Nan::Null());
-  info.This()->Set(Nan::New("onerror").ToLocalChecked(), Nan::Null());
+  Nan::Set(info.This(), Nan::New("onload").ToLocalChecked(), Nan::Null()).Check();
+  Nan::Set(info.This(), Nan::New("onerror").ToLocalChecked(), Nan::Null()).Check();
   info.GetReturnValue().Set(info.This());
 }
 
@@ -97,8 +103,6 @@ NAN_GETTER(Image::GetComplete) {
   Image *img = Nan::ObjectWrap::Unwrap<Image>(info.This());
   info.GetReturnValue().Set(Nan::New<Boolean>(Image::COMPLETE == img->state));
 }
-
-#if CAIRO_VERSION_MINOR >= 10
 
 /*
  * Get dataMode.
@@ -116,12 +120,10 @@ NAN_GETTER(Image::GetDataMode) {
 NAN_SETTER(Image::SetDataMode) {
   if (value->IsNumber()) {
     Image *img = Nan::ObjectWrap::Unwrap<Image>(info.This());
-    int mode = value->Uint32Value();
+    int mode = Nan::To<uint32_t>(value).FromMaybe(0);
     img->data_mode = (data_mode_t) mode;
   }
 }
-
-#endif
 
 /*
  * Get natural width
@@ -148,7 +150,7 @@ NAN_GETTER(Image::GetWidth) {
 NAN_SETTER(Image::SetWidth) {
   if (value->IsNumber()) {
     Image *img = Nan::ObjectWrap::Unwrap<Image>(info.This());
-    img->width = value->Uint32Value();
+    img->width = Nan::To<uint32_t>(value).FromMaybe(0);
   }
 }
 
@@ -176,7 +178,7 @@ NAN_GETTER(Image::GetHeight) {
 NAN_SETTER(Image::SetHeight) {
   if (value->IsNumber()) {
     Image *img = Nan::ObjectWrap::Unwrap<Image>(info.This());
-    img->height = value->Uint32Value();
+    img->height = Nan::To<uint32_t>(value).FromMaybe(0);
   }
 }
 
@@ -241,14 +243,14 @@ NAN_METHOD(Image::SetSource){
     img->filename = strdup(*src);
     status = img->load();
   // Buffer
-  } else if (Buffer::HasInstance(value)) {
-    uint8_t *buf = (uint8_t *) Buffer::Data(value->ToObject());
-    unsigned len = Buffer::Length(value->ToObject());
+  } else if (node::Buffer::HasInstance(value)) {
+    uint8_t *buf = (uint8_t *) node::Buffer::Data(Nan::To<Object>(value).ToLocalChecked());
+    unsigned len = node::Buffer::Length(Nan::To<Object>(value).ToLocalChecked());
     status = img->loadFromBuffer(buf, len);
   }
 
   if (status) {
-    Local<Value> onerrorFn = info.This()->Get(Nan::New("onerror").ToLocalChecked());
+    Local<Value> onerrorFn = Nan::Get(info.This(), Nan::New("onerror").ToLocalChecked()).ToLocalChecked();
     if (onerrorFn->IsFunction()) {
       Local<Value> argv[1];
       CanvasError errorInfo = img->errorInfo;
@@ -256,16 +258,18 @@ NAN_METHOD(Image::SetSource){
         argv[0] = Nan::ErrnoException(errorInfo.cerrno, errorInfo.syscall.c_str(), errorInfo.message.c_str(), errorInfo.path.c_str());
       } else if (!errorInfo.message.empty()) {
         argv[0] = Nan::Error(Nan::New(errorInfo.message).ToLocalChecked());
-      } else {      
+      } else {
         argv[0] = Nan::Error(Nan::New(cairo_status_to_string(status)).ToLocalChecked());
       }
-      onerrorFn.As<Function>()->Call(Isolate::GetCurrent()->GetCurrentContext()->Global(), 1, argv);
+      Local<Context> ctx = Nan::GetCurrentContext();
+      Nan::Call(onerrorFn.As<Function>(), ctx->Global(), 1, argv).ToLocalChecked();
     }
   } else {
     img->loaded();
-    Local<Value> onloadFn = info.This()->Get(Nan::New("onload").ToLocalChecked());
+    Local<Value> onloadFn = Nan::Get(info.This(), Nan::New("onload").ToLocalChecked()).ToLocalChecked();
     if (onloadFn->IsFunction()) {
-      onloadFn.As<Function>()->Call(Isolate::GetCurrent()->GetCurrentContext()->Global(), 0, NULL);
+      Local<Context> ctx = Nan::GetCurrentContext();
+      Nan::Call(onloadFn.As<Function>(), ctx->Global(), 0, NULL).ToLocalChecked();
     }
   }
 }
@@ -293,9 +297,6 @@ Image::loadFromBuffer(uint8_t *buf, unsigned len) {
 
   if (isJPEG(data)) {
 #ifdef HAVE_JPEG
-#if CAIRO_VERSION_MINOR < 10
-    return loadJPEGFromBuffer(buf, len);
-#else
     if (DATA_IMAGE == data_mode) return loadJPEGFromBuffer(buf, len);
     if (DATA_MIME == data_mode) return decodeJPEGBufferIntoMimeSurface(buf, len);
     if ((DATA_IMAGE | DATA_MIME) == data_mode) {
@@ -304,7 +305,6 @@ Image::loadFromBuffer(uint8_t *buf, unsigned len) {
       if (status) return status;
       return assignDataAsMime(buf, len, CAIRO_MIME_TYPE_JPEG);
     }
-#endif // CAIRO_VERSION_MINOR < 10
 #else // HAVE_JPEG
     this->errorInfo.set("node-canvas was built without JPEG support");
     return CAIRO_STATUS_READ_ERROR;
@@ -322,6 +322,9 @@ Image::loadFromBuffer(uint8_t *buf, unsigned len) {
     return CAIRO_STATUS_READ_ERROR;
 #endif
   }
+
+  if (isBMP(buf, len))
+    return loadBMPFromBuffer(buf, len);
 
   this->errorInfo.set("Unsupported image type");
   return CAIRO_STATUS_READ_ERROR;
@@ -458,7 +461,7 @@ Image::loadSurface() {
     return loadPNG();
   }
 
-  
+
   if (isGIF(buf)) {
 #ifdef HAVE_GIF
     return loadGIF(stream);
@@ -498,6 +501,9 @@ Image::loadSurface() {
     return CAIRO_STATUS_READ_ERROR;
 #endif
   }
+
+  if (isBMP(buf, 2))
+    return loadBMP(stream);
 
   fclose(stream);
 
@@ -606,16 +612,13 @@ Image::loadGIFFromBuffer(uint8_t *buf, unsigned len) {
     return CAIRO_STATUS_READ_ERROR;
   }
 
-  width = naturalWidth = gif->SWidth;
-  height = naturalHeight = gif->SHeight;
-
-  /* Cairo limit:
-   * https://lists.cairographics.org/archives/cairo/2010-December/021422.html
-   */
-  if (width > 32767 || height > 32767) {
+  if (gif->SWidth > canvas_max_side || gif->SHeight > canvas_max_side) {
     GIF_CLOSE_FILE(gif);
     return CAIRO_STATUS_INVALID_SIZE;
   }
+
+  width = naturalWidth = gif->SWidth;
+  height = naturalHeight = gif->SHeight;
 
   uint8_t *data = new uint8_t[naturalWidth * naturalHeight * 4];
   if (!data) {
@@ -801,7 +804,7 @@ void Image::jpegToARGB(jpeg_decompress_struct* args, uint8_t* data, uint8_t* src
 cairo_status_t
 Image::decodeJPEGIntoSurface(jpeg_decompress_struct *args) {
   cairo_status_t status = CAIRO_STATUS_SUCCESS;
-  
+
   uint8_t *data = new uint8_t[naturalWidth * naturalHeight * 4];
   if (!data) {
     jpeg_abort_decompress(args);
@@ -893,8 +896,6 @@ static void canvas_jpeg_output_message(j_common_ptr cinfo) {
   // (Only the last message will be returned to JS land.)
   cjerr->image->errorInfo.set(buff);
 }
-
-#if CAIRO_VERSION_MINOR >= 10
 
 /*
  * Takes a jpeg data buffer and assigns it as mime data to a
@@ -1010,8 +1011,6 @@ Image::assignDataAsMime(uint8_t *data, int len, const char *mime_type) {
     , mime_closure);
 }
 
-#endif
-
 /*
  * Load jpeg from buffer.
  */
@@ -1084,13 +1083,18 @@ Image::loadJPEG(FILE *stream) {
 
     jpeg_read_header(&args, 1);
     jpeg_start_decompress(&args);
+
+    if (args.output_width > canvas_max_side || args.output_height > canvas_max_side) {
+      jpeg_destroy_decompress(&args);
+      return CAIRO_STATUS_INVALID_SIZE;
+    }
+
     width = naturalWidth = args.output_width;
     height = naturalHeight = args.output_height;
 
     status = decodeJPEGIntoSurface(&args);
     fclose(stream);
   } else { // We'll need the actual source jpeg data, so read fully.
-#if CAIRO_VERSION_MINOR >= 10
     uint8_t *buf;
     unsigned len;
 
@@ -1123,9 +1127,6 @@ Image::loadJPEG(FILE *stream) {
 
     fclose(stream);
     free(buf);
-#else
-    status = CAIRO_STATUS_READ_ERROR;
-#endif
   }
 
   return status;
@@ -1242,6 +1243,77 @@ Image::loadSVG(FILE *stream) {
 #endif /* HAVE_RSVG */
 
 /*
+ * Load BMP from buffer.
+ */
+
+cairo_status_t Image::loadBMPFromBuffer(uint8_t *buf, unsigned len){
+  BMPParser::Parser parser;
+
+  // Reversed ARGB32 with pre-multiplied alpha
+  uint8_t pixFmt[5] = {2, 1, 0, 3, 1};
+  parser.parse(buf, len, pixFmt);
+
+  if (parser.getStatus() != BMPParser::Status::OK) {
+    errorInfo.reset();
+    errorInfo.message = parser.getErrMsg();
+    return CAIRO_STATUS_READ_ERROR;
+  }
+
+  width = naturalWidth = parser.getWidth();
+  height = naturalHeight = parser.getHeight();
+  uint8_t *data = parser.getImgd();
+
+  _surface = cairo_image_surface_create_for_data(
+    data,
+    CAIRO_FORMAT_ARGB32,
+    width,
+    height,
+    cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, width)
+  );
+
+  // No need to delete the data
+  cairo_status_t status = cairo_surface_status(_surface);
+  if (status) return status;
+
+  _data = data;
+  parser.clearImgd();
+
+  return CAIRO_STATUS_SUCCESS;
+}
+
+/*
+ * Load BMP.
+ */
+
+cairo_status_t Image::loadBMP(FILE *stream){
+  struct stat s;
+  int fd = fileno(stream);
+
+  // Stat
+  if (fstat(fd, &s) < 0) {
+    fclose(stream);
+    return CAIRO_STATUS_READ_ERROR;
+  }
+
+  uint8_t *buf = new uint8_t[s.st_size];
+
+  if (!buf) {
+    fclose(stream);
+    errorInfo.set(NULL, "malloc", errno);
+    return CAIRO_STATUS_NO_MEMORY;
+  }
+
+  size_t read = fread(buf, s.st_size, 1, stream);
+  fclose(stream);
+
+  cairo_status_t result = CAIRO_STATUS_READ_ERROR;
+  if (read == 1) result = loadBMPFromBuffer(buf, s.st_size);
+  delete[] buf;
+
+  return result;
+}
+
+/*
  * Return UNKNOWN, SVG, GIF, JPEG, or PNG based on the filename.
  */
 
@@ -1303,4 +1375,19 @@ Image::isSVG(uint8_t *data, unsigned len) {
     }
   }
   return false;
+}
+
+/*
+ * Check for valid BMP signatures
+ */
+
+int Image::isBMP(uint8_t *data, unsigned len) {
+  if(len < 2) return false;
+  std::string sig = std::string(1, (char)data[0]) + (char)data[1];
+  return sig == "BM" ||
+         sig == "BA" ||
+         sig == "CI" ||
+         sig == "CP" ||
+         sig == "IC" ||
+         sig == "PT";
 }

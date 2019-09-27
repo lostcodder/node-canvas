@@ -92,6 +92,8 @@ describe('Canvas', function () {
 
       assert.deepEqual(actual, expected, 'Failed to parse: ' + str);
     }
+
+    assert.strictEqual(parseFont('Helvetica, sans'), undefined)
   });
 
   it('registerFont', function () {
@@ -348,21 +350,51 @@ describe('Canvas', function () {
   });
 
   it('Canvas#{width,height}=', function () {
-    var context, canvas = createCanvas(100, 200);
+    const canvas = createCanvas(100, 200);
+    const context = canvas.getContext('2d');
 
-    assert.equal(100, canvas.width);
-    assert.equal(200, canvas.height);
+    assert.equal(canvas.width, 100);
+    assert.equal(canvas.height, 200);
 
-    canvas = createCanvas();
-    context = canvas.getContext("2d");
-    assert.equal(0, canvas.width);
-    assert.equal(0, canvas.height);
+    context.globalAlpha = .5;
+    context.fillStyle = '#0f0';
+    context.strokeStyle = '#0f0';
+    context.font = '20px arial';
+    context.fillRect(0, 0, 1, 1);
 
     canvas.width = 50;
-    canvas.height = 50;
-    assert.equal(50, canvas.width);
-    assert.equal(50, canvas.height);
-    assert.equal(1, context.lineWidth); // #1095
+    canvas.height = 70;
+    assert.equal(canvas.width, 50);
+    assert.equal(canvas.height, 70);
+
+    context.font = '20px arial';
+    assert.equal(context.font, '20px arial');
+    canvas.width |= 0;
+
+    assert.equal(context.lineWidth, 1); // #1095
+    assert.equal(context.globalAlpha, 1); // #1292
+    assert.equal(context.fillStyle, '#000000');
+    assert.equal(context.strokeStyle, '#000000');
+    assert.equal(context.font, '10px sans-serif');
+    assert.strictEqual(context.getImageData(0, 0, 1, 1).data.join(','), '0,0,0,0');
+  });
+
+  it('Canvas#width= (resurfacing) doesn\'t crash when fillStyle is a pattern (#1357)', function (done) {
+    const canvas = createCanvas(100, 200);
+    const ctx = canvas.getContext('2d');
+
+    loadImage(`${__dirname}/fixtures/checkers.png`).then(img => {
+      const pattern = ctx.createPattern(img, 'repeat');
+      ctx.fillStyle = pattern;
+      ctx.fillRect(0, 0, 300, 300);
+      canvas.width = 200; // cause canvas to resurface
+      done();
+    })
+  });
+
+  it('SVG Canvas#width changes don\'t crash (#1380)', function () {
+    const myCanvas = createCanvas(100, 100, 'svg')
+    myCanvas.width = 120;
   });
 
   it('Canvas#stride', function() {
@@ -400,12 +432,15 @@ describe('Canvas', function () {
   });
 
   it('Context2d#font=', function () {
-    var canvas = createCanvas(200, 200)
-      , ctx = canvas.getContext('2d');
+    const canvas = createCanvas(200, 200)
+    const ctx = canvas.getContext('2d')
 
-    assert.equal('10px sans-serif', ctx.font);
-    ctx.font = '15px Arial, sans-serif';
-    assert.equal('15px Arial, sans-serif', ctx.font);
+    assert.equal(ctx.font, '10px sans-serif')
+    ctx.font = '15px Arial, sans-serif'
+    assert.equal(ctx.font, '15px Arial, sans-serif')
+
+    ctx.font = 'Helvetica, sans' // invalid
+    assert.equal(ctx.font, '15px Arial, sans-serif')
   });
 
   it('Context2d#lineWidth=', function () {
@@ -516,11 +551,13 @@ describe('Canvas', function () {
     it('Canvas#toBuffer("image/png", {resolution: 96})', function () {
       const buf = createCanvas(200, 200).toBuffer('image/png', {resolution: 96});
       // 3780 ppm ~= 96 ppi
+      let foundpHYs = false;
       for (let i = 0; i < buf.length - 12; i++) {
         if (buf[i] === 0x70 &&
           buf[i + 1] === 0x48 &&
           buf[i + 2] === 0x59 &&
           buf[i + 3] === 0x73) { // pHYs
+          foundpHYs = true;
           assert.equal(buf[i + 4], 0);
           assert.equal(buf[i + 5], 0);
           assert.equal(buf[i + 6], 0x0e);
@@ -531,6 +568,7 @@ describe('Canvas', function () {
           assert.equal(buf[i + 11], 0xc4); // y
         }
       }
+      assert.ok(foundpHYs, "missing pHYs header");
     })
 
     it('Canvas#toBuffer("image/png", {compressionLevel: 5})', function () {
@@ -902,6 +940,7 @@ describe('Canvas', function () {
 
       ctx.textBaseline = "bottom"
       metrics = ctx.measureText("Alphabet")
+      assert.strictEqual(ctx.textBaseline, "bottom")
       assert.ok(metrics.alphabeticBaseline > 0) // ~4-5
       assert.ok(metrics.actualBoundingBoxAscent > 0)
       // On the baseline or slightly above
@@ -909,18 +948,45 @@ describe('Canvas', function () {
     });
   });
 
+  it('Context2d#fillText()', function () {
+    [
+      [['A', 10, 10], true],
+      [['A', 10, 10, undefined], true],
+      [['A', 10, 10, NaN], false],
+    ].forEach(([args, shouldDraw]) => {
+      const canvas = createCanvas(20, 20)
+      const ctx = canvas.getContext('2d')
+
+      ctx.textBaseline = 'middle'
+      ctx.textAlign = 'center'
+      ctx.fillText(...args)
+
+      assert.strictEqual(ctx.getImageData(0, 0, 20, 20).data.some(a => a), shouldDraw)
+    })
+  })
+
   it('Context2d#currentTransform', function () {
     var canvas = createCanvas(20, 20);
     var ctx = canvas.getContext('2d');
 
     ctx.scale(0.1, 0.3);
-    var actual = ctx.currentTransform;
-    assert.equal(actual.a, 0.1);
-    assert.equal(actual.b, 0);
-    assert.equal(actual.c, 0);
-    assert.equal(actual.d, 0.3);
-    assert.equal(actual.e, 0);
-    assert.equal(actual.f, 0);
+    var mat1 = ctx.currentTransform;
+    assert.equal(mat1.a, 0.1);
+    assert.equal(mat1.b, 0);
+    assert.equal(mat1.c, 0);
+    assert.equal(mat1.d, 0.3);
+    assert.equal(mat1.e, 0);
+    assert.equal(mat1.f, 0);
+
+    ctx.resetTransform();
+    var mat2 = ctx.currentTransform;
+    assert.equal(mat2.a, 1);
+    assert.equal(mat2.d, 1);
+
+    ctx.currentTransform = mat1;
+    var mat3 = ctx.currentTransform;
+    assert.equal(mat3.a, 0.1);
+    assert.equal(mat3.d, 0.3);
   });
 
   it('Context2d#createImageData(ImageData)', function () {

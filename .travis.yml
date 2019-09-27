@@ -2,9 +2,13 @@ language: node_js
 install:
   - npm install --build-from-source
 node_js:
+  - '12'
   - '10'
   - '8'
   - '6'
+matrix:
+  allow_failures:
+    - node_js: '12'
 addons:
   apt:
     sources:
@@ -18,4 +22,6 @@ addons:
       - g++-4.9
 env:
   - CXX=g++-4.9
-sudo: false
+script:
+  - node_version=$(node -v); if [ ${node_version:1:2} = 10 ]; then npm run dtslint; fi
+  - npm test
