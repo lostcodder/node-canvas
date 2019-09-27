@@ -357,6 +357,15 @@ NAN_METHOD(Canvas::ToBuffer) {
     return;
   }
 
+  if (info[0]->StrictEquals(Nan::New<String>("native").ToLocalChecked())) {
+    cairo_surface_t *surface = canvas->surface();
+    cairo_surface_flush(surface);
+    unsigned char *data = cairo_image_surface_get_data(surface);
+    //Local<Object> buf = ;
+    info.GetReturnValue().Set(Nan::NewBuffer(reinterpret_cast<char*>(data), canvas->nBytes()).ToLocalChecked());
+    return;
+  }
+
   // Sync PNG, default
   if (info[0]->IsUndefined() || info[0]->StrictEquals(Nan::New<String>("image/png").ToLocalChecked())) {
     try {

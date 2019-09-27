@@ -28,8 +28,7 @@
     "pretest": "standard examples/*.js test/server.js test/public/*.js benchmark/run.js util/has_lib.js browser.js index.js && node-gyp build",
     "test": "mocha test/*.test.js",
     "pretest-server": "node-gyp build",
-    "test-server": "node test/server.js",
-    "install": "node-pre-gyp install --fallback-to-build"
+    "test-server": "node test/server.js"
   },
   "binary": {
     "module_name": "canvas-prebuilt",
@@ -39,15 +38,10 @@
     "package_name": "{module_name}-v{version}-{node_abi}-{platform}-{libc}-{arch}.tar.gz"
   },
   "dependencies": {
-    "nan": "^2.11.1",
-    "node-pre-gyp": "^0.11.0"
+
   },
   "devDependencies": {
-    "assert-rejects": "^1.0.0",
-    "express": "^4.16.3",
-    "mocha": "^5.2.0",
-    "pixelmatch": "^4.0.2",
-    "standard": "^12.0.1"
+
   },
   "engines": {
     "node": ">=6"
